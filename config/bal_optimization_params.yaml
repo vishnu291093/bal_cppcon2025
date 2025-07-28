@@ -1,0 +1,30 @@
+bal_optimization_node:
+  ros__parameters:
+    dataset_path: "/root/common/ros_ws/src/bundle_adjustment_at_large_cppcon/datasets/problem-49-7776-pre.txt"
+    use_filter: true
+    depth_threshold: 0.1
+    scale: 10.0
+    normalize_data: true
+    min_observations_per_landmark: 2
+    # Quality Assessment Thresholds
+    hybrid_pipeline:
+      # Error thresholds for quality assessment (in pixels)
+      good_error_threshold: 1.0          # Below this = "Good" quality
+      moderate_error_threshold: 3.0      # Below this = "Moderate" quality (above = "Poor")
+      
+      # Default Analysis Parameters
+      worst_cameras_stats: 10             # Default number of worst cameras to show
+      worst_points_stats: 10              # Default number of worst points to show
+      
+      # Output Formatting Precision
+      error_precision: 2        # Decimal places for error reduction %
+      
+      # Feature Toggles
+      verbose_logging: true        # Enable detailed logging output
+
+      # camera window size for the moving optimization
+      camera_window_size: 10
+      cyclic_window: false
+      window_step_size : 4  # should be less than camera_window_size
+
+      

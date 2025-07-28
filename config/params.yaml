@@ -1,0 +1,8 @@
+bal_visualizer_node:
+  ros__parameters:
+    dataset_path: "/root/common/ros_ws/src/bundle_adjustment_at_large_cppcon/datasets/problem-1723-156502-pre.txt"
+    use_filter: true
+    depth_threshold: 0.1
+    scale: 10.0
+    normalize_data: true
+    min_observations_per_landmark: 2
