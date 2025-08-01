@@ -107,7 +107,7 @@ struct CameraModel {
 struct Camera {
     SE3 T_c_w{};
     CameraModel intrinsics{};
-    
+    int id{-1};
     constexpr Camera() = default;
     constexpr Camera(const SE3& transform, const CameraModel& camera_intrinsics) noexcept 
         : T_c_w{transform}, intrinsics{camera_intrinsics} {}
@@ -162,6 +162,7 @@ struct Observation {
 // Final extracted dataset
 struct BALData {
     std::vector<Observation> observations{};
+    std::vector<Camera> cameras{};
     std::vector<std::array<double, CAMERA_PARAM_SIZE>> camera_params{};
     std::vector<std::array<double, POINT_3D_SIZE>> points{};
     std::unordered_map<int, std::set<int>> camera_to_observations_map{};

@@ -11,7 +11,13 @@
 #include <random>
 #include <algorithm>
 #include <ranges>       // C++20: ranges and views
+#include <execution>  // C++17: parallel execution policies
+#include <optional>
 
+#include <boost/geometry.hpp>
+#include <boost/geometry/index/rtree.hpp>
+#include <boost/geometry/geometries/point.hpp>
+#include <boost/geometry/geometries/box.hpp>
 
 namespace bal_cppcon {
 
@@ -69,6 +75,10 @@ private:
 
     class HybridPipeline {
         public:
+
+            using Point3D = boost::geometry::model::point<double, 3, boost::geometry::cs::cartesian>;
+            using Value = std::pair<Point3D, int>;
+
             // C++20: explicit constructor with modern shared_ptr
             explicit HybridPipeline(std::shared_ptr<rclcpp::Node> node, BALData data) noexcept;
             ~HybridPipeline() = default;
@@ -131,26 +141,32 @@ private:
 
             void runWindowedOptimization();
 
-            void runRansac(int window_start_node);
+            std::unordered_map<int, std::vector<int>> runSinglePassOutlierRejection(int window_start_node);
+
+
 
         private:
             std::shared_ptr<rclcpp::Node> node_;
             std::unique_ptr<DataStats> data_stats_;
             BALData data_;
             HybridPipelineConfig config_;
-            
+            boost::geometry::index::rtree<Value, boost::geometry::index::linear<16>> rtree_;
+            std::unordered_map<int, std::set<int>> camera_to_valid_observations_map{};
+
             // Random number generator for RANSAC
             mutable std::mt19937 rng_;
+            
+            // Mutex for thread-safe operations
+            mutable std::mutex single_pass_mutex_;
             
             // C++20: private helper with string_view
             void logMessage(std::string_view level, std::string_view message) const noexcept;
             
-            // RANSAC helper functions using data_model.h structures
-            std::vector<Camera> createCameraWindow(int start_idx) const;
-            std::unordered_map<int, std::vector<Observation>> groupObservationsByCamera() const;
             std::vector<Observation> randomSample(std::span<const Observation> observations, int sample_size) const;
             Vec2 projectPoint(const Vec3& point_3d, const Camera& camera) const;
-            Camera createCameraFromParams(int camera_id, std::span<const double, CAMERA_PARAM_SIZE> camera_params) const;
+
+            void setupRTree();
+            void performSpatialFiltering(const int window_start, const std::unordered_map<int, std::vector<int>>& filter_observations);
     };
 }
 

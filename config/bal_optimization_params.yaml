@@ -26,5 +26,7 @@ bal_optimization_node:
       camera_window_size: 10
       cyclic_window: false
       window_step_size : 4  # should be less than camera_window_size
-
+      reprojection_threshold : 300.0
+      max_ransac_iterations: 1000
+      min_sample_size: 8
       

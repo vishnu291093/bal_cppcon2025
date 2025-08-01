@@ -41,7 +41,7 @@ BALData DataParser::extract_data() const noexcept {
             intrinsics(0), intrinsics(1), intrinsics(2)
         };
     };
-    
+    data.cameras = cameras_;
     std::ranges::transform(cameras_, std::back_inserter(data.camera_params), camera_transformer);
     
     return data;
@@ -213,7 +213,7 @@ void DataParser::load_bal_format() noexcept {
                     throw std::runtime_error("Failed to read camera parameters for camera " + std::to_string(i));
                 }
             }
-
+            cameras_[i].id = i;
             cameras_[i].T_c_w.so3() = axis_inversion * SO3::exp(params.head<3>());
             cameras_[i].T_c_w.translation() = axis_inversion * params.segment<3>(3);
             cameras_[i].intrinsics = CameraModel{params(6), params(7), params(8)};

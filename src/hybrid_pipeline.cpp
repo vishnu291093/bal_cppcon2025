@@ -4,6 +4,7 @@
 #include <numeric>
 #include <ranges>
 #include <optional>
+#include <execution>  // C++17: parallel execution policies
 
 
 namespace bal_cppcon {
@@ -36,7 +37,7 @@ namespace bal_cppcon {
         
         // RANSAC parameters
         max_ransac_iterations = node_->declare_parameter("hybrid_pipeline.max_ransac_iterations", 1000);
-        reprojection_threshold = node_->declare_parameter("hybrid_pipeline.reprojection_threshold", 2.0);
+        reprojection_threshold = node_->declare_parameter("hybrid_pipeline.reprojection_threshold", 200.0);
         min_sample_size = node_->declare_parameter("hybrid_pipeline.min_sample_size", 8);
     }
 
@@ -192,7 +193,7 @@ namespace bal_cppcon {
         }
     }
 
-    void HybridPipeline::runRansac(int window_start_node) {
+    std::unordered_map<int, std::vector<int>> HybridPipeline::runSinglePassOutlierRejection(int window_start_node) {
         if (config_.verbose_logging) {
             logMessage("INFO", "Running RANSAC for window starting at camera " + std::to_string(window_start_node));
         }
@@ -202,56 +203,50 @@ namespace bal_cppcon {
                                              std::min(window_start_node + static_cast<int>(config_.camera_window_size), 
                                                      static_cast<int>(data_.num_cameras())));
         
-        // C++20 ranges: Transform camera indices to Camera objects using views with span
+        // C++20 ranges: Create camera window using direct camera access
         auto window_cameras = camera_indices 
                             | std::views::transform([this](int idx) { 
-                                auto params_span = std::span<const double, CAMERA_PARAM_SIZE>{data_.camera_params[idx]};
-                                return createCameraFromParams(idx, params_span); 
-                              })
-                            | std::views::enumerate;  // Add index for easier access
+                                return data_.cameras[idx]; 
+                              });
         
         // Store filtered observations using existing structures
-        std::unordered_map<int, std::vector<Observation>> filtered_observations;
+        std::unordered_map<int, std::vector<int>> filtered_observation_indices;
+        filtered_observation_indices.reserve(window_cameras.size());
         
-        // Run RANSAC for each camera in the window using ranges
-        for (const auto& [cam_idx, camera] : window_cameras) {
-            int camera_id = window_start_node + static_cast<int>(cam_idx);
-            
-            // C++20 ranges: Filter observations for this specific camera
-            auto obs_for_cam = data_.observations 
-                             | std::views::filter([camera_id](const auto& obs) { 
-                                 return obs.is_valid() && obs.camera_index == camera_id; 
-                               });
-            
-            // Convert view to vector for random sampling
-            std::vector<Observation> obs_vector{obs_for_cam.begin(), obs_for_cam.end()};
-            
-            if (obs_vector.empty()) {
-                if (config_.verbose_logging) {
-                    logMessage("WARN", "No observations found for camera " + std::to_string(camera_id));
+        // Convert range to vector for parallel processing
+        std::vector<Camera> cameras_vec{window_cameras.begin(), window_cameras.end()};
+
+        // Run outlier rejection for each camera in parallel using std::execution
+        std::for_each(std::execution::par, cameras_vec.begin(), cameras_vec.end(),
+            [this, &filtered_observation_indices](const Camera& camera) {
+                // Use camera.id directly instead of calculating from indices
+                int camera_id = camera.id;
+                
+                // C++20 ranges: Use camera_to_observations_map for direct access
+                auto obs_it = data_.camera_to_observations_map.find(camera_id);
+                if (obs_it == data_.camera_to_observations_map.end()) {
+                    if (config_.verbose_logging) {
+                        logMessage("WARN", "No observations found for camera " + std::to_string(camera_id));
+                    }
+                    return; // Continue to next camera
                 }
-                continue;
-            }
-            
-            std::vector<Observation> best_consensus_set;
-            
-            if (config_.verbose_logging) {
-                logMessage("INFO", "Processing camera " + std::to_string(camera_id) + 
-                          " with " + std::to_string(obs_vector.size()) + " observations");
-            }
-            
-            // RANSAC iterations
-            for (int iter = 0; iter < config_.max_ransac_iterations; ++iter) {
-                // 1. Randomly sample observations for model hypothesis using span
-                int sample_size = std::min(config_.min_sample_size, static_cast<int>(obs_vector.size()));
-                auto obs_span = std::span<const Observation>{obs_vector};
-                auto sample = randomSample(obs_span, sample_size);
 
-                // 2. No model fitting needed — we already have camera pose!
-                // So we skip estimation step and go straight to error checking
+                // Work directly with the set of indices - no intermediate vector needed
+                const auto& obs_indices_set = obs_it->second;
 
-                // C++20 ranges: Filter inliers using views and functional approach with span
-                auto compute_error = [this, &camera](const Observation& obs) -> std::optional<std::pair<Observation, double>> {
+                // Use the set directly in the outlier rejection
+                if (obs_indices_set.empty()) {
+                    if (config_.verbose_logging) {
+                        logMessage("WARN", "No observations found for camera " + std::to_string(camera_id));
+                    }
+                    return; // Continue to next camera
+                }
+
+                // Single-pass outlier rejection (no need for multiple iterations)
+                // C++20 ranges: Filter inliers using views and functional approach
+                auto compute_error = [this, &camera](int obs_idx) -> std::optional<std::pair<int, double>> {
+                    const auto& obs = data_.observations[obs_idx];
+                    
                     // Validate point index
                     if (obs.point_index >= static_cast<int>(data_.num_points())) {
                         return std::nullopt;
@@ -274,11 +269,11 @@ namespace bal_cppcon {
                     // Compute reprojection error
                     double error = (projected - observed).norm();
                     
-                    return std::make_pair(obs, error);
+                    return std::make_pair(obs_idx, error);
                 };
-                
-                // C++20 ranges: Transform observations to error pairs, filter valid ones, then filter inliers
-                auto inliers = obs_vector 
+
+                // C++20 ranges: Transform observation indices to error pairs, filter valid ones, then filter inliers
+                auto inliers = obs_indices_set 
                              | std::views::transform(compute_error)
                              | std::views::filter([](const auto& opt) { return opt.has_value(); })
                              | std::views::transform([](const auto& opt) { return opt.value(); })
@@ -288,28 +283,39 @@ namespace bal_cppcon {
                              | std::views::transform([](const auto& pair) { return pair.first; });
 
                 // Convert inliers view to vector
-                std::vector<Observation> current_inliers{inliers.begin(), inliers.end()};
+                std::vector<int> best_consensus_set{inliers.begin(), inliers.end()};
 
-                if (current_inliers.size() > best_consensus_set.size()) {
-                    best_consensus_set = std::move(current_inliers);  // update best inlier set
+                // Thread-safe insertion into results map
+                {
+                    std::lock_guard<std::mutex> lock(single_pass_mutex_);
+                    filtered_observation_indices[camera_id] = best_consensus_set;
                 }
-            }
-
-            // Save the best inliers for this camera
-            filtered_observations[camera_id] = best_consensus_set;
-            
-            if (config_.verbose_logging) {
-                double inlier_ratio = static_cast<double>(best_consensus_set.size()) / obs_vector.size();
-                logMessage("INFO", "Camera " + std::to_string(camera_id) + 
-                          ": " + std::to_string(best_consensus_set.size()) + "/" + 
-                          std::to_string(obs_vector.size()) + " inliers (" + 
-                          std::to_string(static_cast<int>(inlier_ratio * 100)) + "%)");
-            }
-        }
+                
+                if (config_.verbose_logging) {
+                    double inlier_ratio = static_cast<double>(best_consensus_set.size()) / obs_indices_set.size();
+                    logMessage("INFO", "Camera " + std::to_string(camera_id) + 
+                              ": " + std::to_string(best_consensus_set.size()) + "/" + 
+                              std::to_string(obs_indices_set.size()) + " inliers (" + 
+                              std::to_string(static_cast<int>(inlier_ratio * 100)) + "%)");
+                }
+            });
         
         if (config_.verbose_logging) {
             logMessage("INFO", "RANSAC completed for window starting at camera " + std::to_string(window_start_node));
         }
+
+        return filtered_observation_indices;
+    }
+
+    void HybridPipeline::setupRTree() {
+        // Create R-tree for spatial filtering
+        int count = 0;
+        for (const auto& point : data_.points) {
+            rtree_.insert(std::make_pair(Point3D(point[0], point[1], point[2]), count++));
+        }
+    }
+
+    void HybridPipeline::performSpatialFiltering(const int window_start, const std::unordered_map<int, std::vector<int>>& filter_observations) {
     }
 
     void HybridPipeline::runWindowedOptimization() {
@@ -318,52 +324,22 @@ namespace bal_cppcon {
             logMessage("INFO", "Camera window size: " + std::to_string(config_.camera_window_size));
         }
 
+        setupRTree();
+
         // C++20 ranges: Generate window start positions using views
         auto window_starts = std::views::iota(0, static_cast<int>(data_.num_cameras())) 
                            | std::views::stride(static_cast<int>(config_.window_step_size));
         
         // Process each window using ranges
         for (int window_start : window_starts) {
-            runRansac(window_start);
+           auto filter_observations = runSinglePassOutlierRejection(window_start);
+
+            performSpatialFiltering(window_start, filter_observations);
         }
         
         // TODO: Implement moving window optimization logic
         // For now, just log that it's a placeholder
         logMessage("INFO", "Moving optimization implementation pending...");
-    }
-    
-    // Helper function implementations using data_model.h structures, ranges, and spans
-    std::vector<Camera> HybridPipeline::createCameraWindow(int start_idx) const {
-        // C++20 ranges: Create camera indices view and transform to Camera objects
-        auto camera_indices = std::views::iota(start_idx, 
-                                             std::min(start_idx + static_cast<int>(config_.camera_window_size), 
-                                                     static_cast<int>(data_.num_cameras())));
-        
-        auto cameras = camera_indices 
-                     | std::views::filter([this](int idx) {
-                         return !data_.camera_parameters(idx).empty();
-                       })
-                     | std::views::transform([this](int idx) {
-                         auto params_span = std::span<const double, CAMERA_PARAM_SIZE>{data_.camera_params[idx]};
-                         return createCameraFromParams(idx, params_span);
-                       });
-        
-        return std::vector<Camera>{cameras.begin(), cameras.end()};
-    }
-    
-    std::unordered_map<int, std::vector<Observation>> HybridPipeline::groupObservationsByCamera() const {
-        std::unordered_map<int, std::vector<Observation>> grouped;
-        
-        // C++20 ranges: Filter valid observations and group by camera
-        auto valid_observations = data_.observations | std::views::filter([](const auto& obs) { 
-            return obs.is_valid(); 
-        });
-        
-        for (const auto& obs : valid_observations) {
-            grouped[obs.camera_index].push_back(obs);
-        }
-        
-        return grouped;
     }
     
     std::vector<Observation> HybridPipeline::randomSample(
@@ -414,24 +390,6 @@ namespace bal_cppcon {
         projected.y() = camera.intrinsics.focal_length * y_distorted;
         
         return projected;
-    }
-    
-    Camera HybridPipeline::createCameraFromParams(int camera_id, std::span<const double, CAMERA_PARAM_SIZE> camera_params) const {
-        // BAL format: [qw, qx, qy, qz, tx, ty, tz, f, k1, k2] - using span for safe access
-        Eigen::Quaterniond q(camera_params[0], camera_params[1], camera_params[2], camera_params[3]);
-        Vec3 t(camera_params[4], camera_params[5], camera_params[6]);
-        
-        // Normalize quaternion
-        q.normalize();
-        
-        // Create SE3 pose
-        SE3 pose(q, t);
-        
-        // Create camera intrinsics using span for safe access
-        CameraModel intrinsics(camera_params[7], camera_params[8], camera_params[9]);
-        
-        // Return Camera struct using the existing data model
-        return Camera(pose, intrinsics);
     }
     
     // C++20: Private helper method with string_view for efficiency

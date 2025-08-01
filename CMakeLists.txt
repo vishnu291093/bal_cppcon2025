@@ -33,6 +33,9 @@ find_package(std_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(TBB REQUIRED)
+find_package(Boost REQUIRED)
+
 pkg_check_modules(YAML_CPP REQUIRED yaml-cpp)
 
 # -----------------------------------------------------------------------------
@@ -88,12 +91,17 @@ target_include_directories(hybrid_pipeline PUBLIC
   include
   ${sophus_SOURCE_DIR}
   ${YAML_CPP_INCLUDE_DIRS}
+  ${Boost_INCLUDE_DIRS}
 )
 target_link_libraries(hybrid_pipeline
   data_parser
   Sophus::Sophus
   ${YAML_CPP_LIBRARIES}
+  ${catkin_LIBRARIES}
+  TBB::tbb
 )
+
+
 ament_target_dependencies(hybrid_pipeline
   rclcpp
   Eigen3
